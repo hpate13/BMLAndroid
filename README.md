@@ -1,131 +1,119 @@
-# BML — Bloons TD 6 Mod Loader for Android
+# BML — Bloons TD 6 Mod Loader for Android (no root)
 
-A MelonLoader-style mod loader for **Bloons TD 6**, purpose-built for **Android**, that runs the BTD6 mods the community already distributes on GitHub.
+A MelonLoader-style mod loader for **Bloons TD 6** that runs on Android **without root** by repackaging the game, so it can run the BTD6 mods the community distributes on GitHub.
 
-> **Status: early scaffold.** This repo currently contains the project structure, an Android app shell, and the architecture for the loader. The deep runtime work is tracked in [Roadmap](#roadmap).
+> **Status: scaffold with the repackaging pipeline implemented.** The runtime loader payload (LemonLoader's binaries) is not bundled yet — see [What's next](#whats-next).
 
 ---
 
 ## What this is
 
-BML is an Android app that installs and manages mods for Bloons TD 6 and launches the game with them enabled — the Android equivalent of the MelonLoader workflow PC players use for BTD6.
+BML is an Android app that turns your installed copy of Bloons TD 6 into a moddable one, then manages the mods:
 
-It is deliberately scoped to Bloons TD 6:
+- **Extracts** your installed BTD6 APK
+- **Injects** the LemonLoader payload
+- **Re-signs** the APK with a locally generated key
+- **Installs** the repacked copy (after uninstalling the original)
+- **Stages** mods in a public folder and **launches** the game
 
-- A curated **GitHub catalog** of BTD6 mods
-- One-tap **install / remove** of mod assemblies
-- **Game detection** and a **launcher** that boots BTD6 with the loader active
+It is deliberately scoped to BTD6: a curated GitHub mod catalog, one-tap install/remove, and the repack + launch flow.
+
+## Why repackaging instead of root
+
+Android blocks apps from writing into another app's private data and from injecting code into another process. MelonLoader's PC approach (drop files into the game folder) therefore doesn't translate directly.
+
+Two ways around it:
+
+- **Root** — read/write `/data/data/...` and `ptrace` the game process.
+- **Repackaging (this project)** — bake the loader into the APK itself, re-sign it, and install the modified copy. No root required.
+
+Repackaging has tradeoffs: the repacked game can't update through Google Play (you re-patch each update), it fails Play Integrity checks, and using any mods violates Ninja Kiwi's ToS.
 
 ## Relationship to MelonLoader and LemonLoader
 
-- **[MelonLoader](https://github.com/LavaGang/MelonLoader)** (LavaGang) is the universal Unity mod loader that the BTD6 PC community standardizes on. It supports both Mono and IL2CPP games; its Android/Oculus support is still marked *work-in-progress*.
-- **[LemonLoader](https://github.com/LemonLoader)** is the Android port of MelonLoader. It exposes the **same MelonLoader mod API** — `MelonMod` base class, attribute registration, Harmony patching, and Il2CppInterop — inside Unity games running on Android, for both Mono and IL2CPP.
-- **Bloons TD 6 is an IL2CPP Unity game** on both PC and Android. On PC you install MelonLoader into the game folder and drop mods into `Mods/`. BML brings that same experience to Android on top of LemonLoader.
+- **[MelonLoader](https://github.com/LavaGang/MelonLoader)** — the universal Unity mod loader the BTD6 PC community standardizes on. Its Android support is still work-in-progress.
+- **[LemonLoader](https://github.com/LemonLoader)** — the Android port of MelonLoader, exposing the same `MelonMod`/Harmony/Il2CppInterop mod API.
+- **BTD6** is an IL2CPP Unity game on both PC and Android. Mods are C# `MelonMod` assemblies, mostly built on **[BTD Mod Helper](https://github.com/gurrenm3/BTD-Mod-Helper)**, distributed as release DLLs on GitHub.
 
-**BML does not reimplement IL2CPP hooking from scratch.** It reuses LemonLoader as the runtime engine — the same way a PC mod manager reuses MelonLoader — and adds what is specific to BTD6: the mod catalog, install/removal, game detection, and launching.
-
-## The mod ecosystem
-
-Most BTD6 mods are C# assemblies built against:
-
-- **MelonLoader's API** (`MelonMod`, mod attributes, `Harmony`)
-- **[BTD Mod Helper](https://github.com/gurrenm3/BTD-Mod-Helper)** (gurrenm3) — the standard modding framework
-- **Il2CppInterop** — for calling into the game's IL2CPP code
-
-They are distributed as release DLLs on GitHub. The "same mods" the PC community uses can run on Android because LemonLoader provides a compatible MelonLoader API — with one important caveat:
-
-> The Android build of BTD6 is a **different IL2CPP binary** than the PC build. Mods that resolve game methods **by name** (via Il2CppInterop) generally work across platforms, while mods that hardcode PC memory offsets, PC-only assemblies, or PC-specific UI need porting. See [Porting notes](#porting-notes).
+BML does **not** reimplement IL2CPP hooking. It reuses LemonLoader's payload and adds the BTD6-specific pieces: repackaging, mod catalog, install/remove, and launching.
 
 ## Architecture
 
 ```
-┌──────────────────────────── BML app (Kotlin / Jetpack Compose) ────────────────────────────┐
-│  ModCatalog (GitHub index)  →  ModInstaller (stage DLLs)  →  LoaderCore (detect + launch)  │
-└─────────────────────────────────────────────┬───────────────────────────────────────────────┘
-                                              │ launches
-                                com.ninjakiwi.bloonstd6 (BTD6)
+┌──────────────────────────── BML app (Kotlin / Jetpack Compose) ───────────────────────────┐
+│                                                                                            │
+│  Repackager ──► ApkExtractor ──► ApkPatcher ──► KeystoreManager ──► ApkSigner             │
+│                    (pull APK)     (inject lib)   (local key)       (v1/v2/v3)              │
+│       └──► PackageInstallerHelper (uninstall original, install repacked)                   │
+│                                                                                            │
+│  ModCatalog (GitHub) ──► ModInstaller (public /BML/Mods dir) ──► LoaderCore (launch)       │
+└─────────────────────────────────────────────┬──────────────────────────────────────────────┘
+                                              │ installs & launches
+                                com.ninjakiwi.bloonstd6 (BTD6, repacked)
                                               │
                        ┌──────────────────────▼───────────────────────┐
                        │  LemonLoader runtime (Android MelonLoader)    │
                        │  libmain injection → il2cpp bootstrap →       │
-                       │  loads MelonLoader/Mods/*.dll                 │
+                       │  loads /BML/Mods/*.dll                        │
                        └───────────────────────────────────────────────┘
 ```
 
+## Pipeline (source files)
+
+| Step | File | Status |
+|---|---|---|
+| Extract installed APK | `core/ApkExtractor.kt` | ✅ implemented |
+| Inject payload / strip signature | `core/ApkPatcher.kt` | ✅ zip-level injection implemented; entry-point patch TODO |
+| Generate signing key | `core/KeystoreManager.kt` | ✅ implemented (BouncyCastle) |
+| Sign APK (v1/v2/v3) | `core/ApkSigner.kt` | ✅ implemented (`apksig`) |
+| Uninstall/install | `core/PackageInstallerHelper.kt` | ✅ implemented |
+| Loader payload resolution | `core/LoaderPayload.kt` | ⚠️ TODO — binaries not bundled |
+| Orchestrate the pipeline | `core/Repackager.kt` | ✅ implemented |
+| Stage mods (public dir) | `core/ModInstaller.kt` | ⚠️ GitHub download TODO |
+| All Files Access helper | `core/StorageAccess.kt` | ✅ implemented |
+| Detect + launch game | `core/LoaderCore.kt` | ✅ implemented |
+
 ## Requirements
 
-**End user (device):**
+**Device:**
 
-- An Android device with Bloons TD 6 installed (`com.ninjakiwi.bloonstd6`)
-- A **rooted device**, or the game installed through LemonLoader's **repackaging** workflow
-- "Install unknown apps" enabled, plus storage access for staging mods
+- Android 7.0+ (API 24), with Bloons TD 6 installed
+- "Install unknown apps" enabled for BML
+- **All Files Access** on Android 11+ (the app links you to the Settings screen)
 
 **Developer:**
 
-- Android Studio (latest), JDK 17, Android SDK (compile/target SDK 34)
-- The Android NDK is only required once the native module is wired in
+- Android Studio (latest), JDK 17, Android SDK 34
 
 ## Building
 
-Open the repo in Android Studio and sync. If the Gradle wrapper jar/scripts are missing, Android Studio regenerates them automatically, or run:
+Open the repo in Android Studio and sync. If the Gradle wrapper jar/scripts are missing, Android Studio regenerates them, or run:
 
 ```bash
 gradle wrapper
 gradle :app:assembleDebug
 ```
 
-> Note: this is an **Android (Gradle) project**, not a web app, so it is not previewable or deployable through Freebuff's web preview/hosting.
+> This is an Android (Gradle) project — not previewable or deployable through Freebuff's web hosting.
 
-## Project layout
+## What's next
 
-```
-├── app/
-│   ├── build.gradle.kts
-│   └── src/main/
-│       ├── AndroidManifest.xml
-│       ├── cpp/                    # native loader hook (placeholder)
-│       │   ├── CMakeLists.txt
-│       │   └── loader.cpp
-│       ├── java/com/bml/android/
-│       │   ├── MainActivity.kt
-│       │   ├── ui/                 # Compose UI (mod list)
-│       │   ├── data/               # Mod model + GitHub catalog
-│       │   └── core/               # ModInstaller + LoaderCore
-│       └── res/
-├── gradle/                         # version catalog + wrapper properties
-└── settings.gradle.kts
-```
-
-## What's implemented vs. what's next
-
-**Implemented (scaffold):**
-
-- README and project structure
-- Gradle + Jetpack Compose app shell (mod list UI, catalog seed, install/remove/launch plumbing)
-- `LoaderCore` wrappers around LemonLoader + BTD6 game detection/launch
-- `ModInstaller` with correct BTD6 paths and the rooted/repackaged workflow contract
-- Native placeholder documenting the in-process injection handoff
-
-**Roadmap (the real work):**
-
-1. Wire LemonLoader's install/bootstrap into `ModInstaller` / `LoaderCore`
-2. Live GitHub mod catalog (GitHub REST API over the BTD6 mod topics + the BTD Mod Helper community index)
-3. Mod asset download, checksumming, and version tracking
-4. Native module: BTD6-specific patches for mods that need them (requires NDK)
-5. Port/verify the most popular mods against the Android IL2CPP build
+1. **Bundle the LemonLoader payload** (`libmain.so` per ABI) as assets or a downloaded release, and fill in `LoaderPayload.load()`.
+2. **Entry-point patch** — the step that makes the repacked game `dlopen` `libmain.so` at startup (LemonLoader's installer spec).
+3. **Live GitHub mod catalog** (GitHub REST API over BTD6 mod topics + the BTD Mod Helper index).
+4. **Mod download + verify + install** into `/BML/Mods`.
+5. **Hand off the mods dir** to LemonLoader inside the repacked game.
+6. Verify the most popular mods against the Android IL2CPP build.
 
 ## Porting notes
 
-- Prefer mods that resolve game APIs through **Il2CppInterop** by name — these are the most portable.
-- Mods referencing **PC-only assemblies** (e.g. desktop-only UI, Steam integration) will not load on Android.
-- Mods that patch methods found by **offset/address** must be updated against the Android `libil2cpp.so`.
-- Test only in **single-player / offline** — never in ranked or public online play.
+- Prefer mods that resolve game APIs through **Il2CppInterop** by name — most portable to Android.
+- Mods referencing **PC-only assemblies** or hardcoded **offsets** need porting against Android's `libil2cpp.so`.
+- Test only in **single-player / offline**.
 
 ## Legal / fair use
 
-Bloons TD 6 mods are not supported by Ninja Kiwi and violate the game's Terms of Service. BML is for **offline, single-player, and private-session use only**. Using mods in ranked or public online play can flag or ban your account.
-
-This project is an educational interoperability effort and is not affiliated with or endorsed by Ninja Kiwi, MelonLoader, LemonLoader, or the BTD Mod Helper authors.
+Bloons TD 6 mods are not supported by Ninja Kiwi and violate the game's Terms of Service. BML is for **offline, single-player, and private-session use only**. Modified clients can be flagged or banned. This project is an educational interoperability effort and is not affiliated with Ninja Kiwi, MelonLoader, LemonLoader, or the BTD Mod Helper authors.
 
 ## Credits
 

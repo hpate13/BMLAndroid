@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,23 +31,32 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bml.android.core.LoaderCore
 import com.bml.android.core.ModInstaller
+import com.bml.android.core.PackageInstallerHelper
+import com.bml.android.core.Repackager
+import com.bml.android.core.StorageAccess
 import com.bml.android.data.Mod
 import com.bml.android.data.ModCatalog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModListScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var mods by remember { mutableStateOf(ModCatalog.seed) }
     var installed by remember { mutableStateOf(emptySet<String>()) }
     var status by remember { mutableStateOf("") }
+    var repackedApk by remember { mutableStateOf<File?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
     val gameInstalled = remember { LoaderCore.isGameInstalled(context) }
-    val loaderReady = remember { LoaderCore.isLoaderBootstrapped(context) }
+    val hasStorageAccess = remember { StorageAccess.hasAllFilesAccess() }
 
     Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("BML — Bloons Mod Loader") })
-        },
+        topBar = { TopAppBar(title = { Text("BML — Bloons Mod Loader") }) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -57,9 +67,56 @@ fun ModListScreen() {
         ) {
             StatusBanner(
                 gameInstalled = gameInstalled,
-                loaderReady = loaderReady,
+                hasStorageAccess = hasStorageAccess,
                 status = status,
             )
+
+            if (!hasStorageAccess) {
+                Button(
+                    onClick = { StorageAccess.requestAllFilesAccess(context) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Grant All Files Access") }
+            }
+
+            Button(
+                onClick = {
+                    busy = true
+                    status = "Repacking BTD6…"
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) { Repackager.build(context) }
+                        result.fold(
+                            onSuccess = { apk ->
+                                repackedApk = apk
+                                status = "Repacked APK ready."
+                            },
+                            onFailure = { status = "Repack failed: ${it.message}" },
+                        )
+                        busy = false
+                    }
+                },
+                enabled = gameInstalled && hasStorageAccess && !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (busy) "Working…" else "Build repacked BTD6 (no root)") }
+
+            val apk = repackedApk
+            if (apk != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { PackageInstallerHelper.requestUninstall(context) },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Uninstall BTD6") }
+                    Button(
+                        onClick = {
+                            PackageInstallerHelper.install(context, apk)
+                            status = "Installing repacked BTD6…"
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Install repacked") }
+                }
+            }
 
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -84,7 +141,7 @@ fun ModListScreen() {
                             status = if (ok) {
                                 "${if (isInstalled) "Removed" else "Installed"} ${mod.name}"
                             } else {
-                                "Could not ${if (isInstalled) "remove" else "install"} ${mod.name} (see docs)"
+                                "Could not ${if (isInstalled) "remove" else "install"} ${mod.name} (not implemented)"
                             }
                         },
                     )
@@ -100,9 +157,7 @@ fun ModListScreen() {
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Launch BTD6 with mods")
-            }
+            ) { Text("Launch BTD6 with mods") }
         }
     }
 }
@@ -110,7 +165,7 @@ fun ModListScreen() {
 @Composable
 private fun StatusBanner(
     gameInstalled: Boolean,
-    loaderReady: Boolean,
+    hasStorageAccess: Boolean,
     status: String,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -123,8 +178,8 @@ private fun StatusBanner(
             Text(
                 text = when {
                     !gameInstalled -> "BTD6 not detected"
-                    !loaderReady -> "BTD6 found — LemonLoader bootstrap not wired yet"
-                    else -> "BTD6 + loader ready"
+                    !hasStorageAccess -> "BTD6 found — grant All Files Access to continue"
+                    else -> "BTD6 found — ready to repack"
                 },
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,

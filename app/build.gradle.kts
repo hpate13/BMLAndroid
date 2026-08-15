@@ -50,4 +50,10 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     debugImplementation(libs.androidx.ui.tooling)
+
+    // APK signing (v1/v2/v3) for the repacked game
+    implementation(libs.apksig)
+    // Self-signed certificate generation for the signing keystore
+    implementation(libs.bouncycastle.pkix)
+    implementation(libs.bouncycastle.prov)
 }
